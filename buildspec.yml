@@ -1,0 +1,18 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - npm install @appbaseio/reactivesearch
+  pre_build:
+    commands:
+      - npm ci
+  build:
+    commands:
+      - npm run build
+artifacts:
+  base-directory: build
+  files:
+    - "**/*"
+cache:
+  paths:
+    - node_modules/**/*
