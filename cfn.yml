@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Sample CodePipeline template for SPA(React) with S3+CloudFront.
+
+Parameters:
+  DeployBucketName:
+    Type: String
+  SourceRepositoryName:
+    Type: String
+  SourceBranch:
+    Type: String
+    Default: main
+
+Resources:
+  ### CodeBuild and CodePipeline ###
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-CodeBuild
+      Description: !Sub "Created by ${AWS::StackName}"
+      Source:
+        BuildSpec: buildspec.yml
+        Type: CODEPIPELINE
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: "BUILD_GENERAL1_SMALL"
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${AWS::StackName}-CodePipeline
+      RoleArn: !GetAtt CodepipelineServiceRole.Arn
+      ArtifactStore:
+        Location: !Ref ArtifactStoreBucket
+        Type: S3
+      RestartExecutionOnUpdate: false
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: "1"
+              Configuration:
+                RepositoryName: !Ref SourceRepositoryName
+                BranchName: !Ref SourceBranch
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuild
+                EnvironmentVariables: !Sub |
+                  [
+                    {
+                      "name":"DEPLOY_BUKET",
+                      "type":"PLAINTEXT",
+                      "value": "${DeployBucketName}"
+                    }
+                  ]
+              InputArtifacts:
+                - Name: SourceArtifact
+              Namespace: BuildVariables
+
+  ArtifactStoreBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-artifactstore-${AWS::AccountId}
+      LifecycleConfiguration:
+        Rules:
+          - Id: clear-old-objects-rule
+            Status: Enabled
+            ExpirationInDays: 7
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+
+  ### ServiceRoles for CodeService ###
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service-role/
+      RoleName: !Sub ${AWS::StackName}-codebuild-ServiceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  CodepipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service-role/
+      RoleName: !Sub ${AWS::StackName}-codepipeline-ServiceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  ### Resorces for EventBridge Rule ###
+  EventBridgeIAMPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "codepipeline:StartPipelineExecution"
+            Resource:
+              - !Sub arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+      ManagedPolicyName: !Sub "${CodePipeline}-policy"
+
+  EventBridgeIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-eventbridge-Role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref EventBridgeIAMPolicy
+
+  EventBridge:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "changeEvent-rule-${CodePipeline}"
+      Description: !Sub "for ${CodePipeline}. Created by ${AWS::StackName}"
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - "CodeCommit Repository State Change"
+        resources:
+          - !Sub arn:${AWS::Partition}:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepositoryName}
+        detail:
+          event: ["referenceCreated", "referenceUpdated"]
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref SourceBranch
+      State: ENABLED
+      Targets:
+        - Arn: !Sub arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+          Id: CodePipeline
+          RoleArn: !GetAtt EventBridgeIAMRole.Arn
